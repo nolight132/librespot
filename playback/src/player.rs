@@ -24,7 +24,7 @@ use crate::{
     audio_backend::Sink,
     config::{Bitrate, NormalisationMethod, NormalisationType, PlayerConfig},
     convert::Converter,
-    core::{Error, Session, SpotifyId, SpotifyUri, util::SeqGenerator},
+    core::{Error, Session, SpotifyId, SpotifyUri, error::ErrorKind, util::SeqGenerator},
     decoder::{AudioDecoder, AudioPacket, AudioPacketPosition, SymphoniaDecoder},
     local_file::{LocalFileLookup, create_local_file_lookup},
     metadata::audio::{AudioFileFormat, AudioFiles, AudioItem},
@@ -195,6 +195,7 @@ pub enum PlayerEvent {
     Unavailable {
         play_request_id: u64,
         track_id: SpotifyUri,
+        denied: bool,
     },
     // The mixer volume was set to a new level.
     VolumeChanged {
@@ -1078,6 +1079,10 @@ impl PlayerTrackLoader {
             // parsing and bail out, so we should be safe from outputting ear-piercing noise.
             let key = match self.session.audio_key().request(track_id, file_id).await {
                 Ok(key) => Some(key),
+                Err(e) if e.kind == ErrorKind::PermissionDenied => {
+                    error!("Unable to load key, giving up on <{track_id:?}>: {e}");
+                    return None;
+                }
                 Err(e) => {
                     warn!("Unable to load key, continuing without decryption: {e}");
                     None
@@ -1373,9 +1378,11 @@ impl Future for PlayerInternal {
                             error!(
                                 "Skipping to next track, unable to load track <{track_id:?}>: {e:?}"
                             );
+                            let denied = self.session.audio_key().is_denied();
                             self.send_event(PlayerEvent::Unavailable {
                                 track_id,
                                 play_request_id,
+                                denied,
                             })
                         }
                         Poll::Pending => (),
@@ -1411,9 +1418,11 @@ impl Future for PlayerInternal {
                             play_request_id, ..
                         } = self.state
                         {
+                            let denied = self.session.audio_key().is_denied();
                             self.send_event(PlayerEvent::Unavailable {
                                 track_id,
                                 play_request_id,
+                                denied,
                             });
                         }
                     }
