@@ -70,6 +70,9 @@ component! {
         sequence: SeqGenerator<u32> = SeqGenerator::new(0),
         pending: HashMap<u32, oneshot::Sender<Result<AudioKey, Error>>> = HashMap::new(),
         denied: bool = false,
+        // Set by a retryable refusal and cleared by the next key served, so it reads true
+        // while Spotify is turning keys down for now, as it does under a burst of loads.
+        throttled: bool = false,
     }
 }
 
@@ -95,6 +98,7 @@ impl AudioKeyManager {
                 }
                 let mut key = [0u8; 16];
                 key.copy_from_slice(&data.as_ref()[..16]);
+                self.lock(|inner| inner.throttled = false);
                 sender
                     .send(Ok(AudioKey(key)))
                     .map_err(|_| AudioKeyError::Channel)?
@@ -108,9 +112,10 @@ impl AudioKeyManager {
                     }
                 };
                 error!("error audio key {seq}: {code}");
-                if !code.retryable() {
-                    self.lock(|inner| inner.denied = true);
-                }
+                self.lock(|inner| match code.retryable() {
+                    true => inner.throttled = true,
+                    false => inner.denied = true,
+                });
                 sender
                     .send(Err(AudioKeyError::refusal(code).into()))
                     .map_err(|_| AudioKeyError::Channel)?
@@ -126,6 +131,12 @@ impl AudioKeyManager {
 
     pub fn is_denied(&self) -> bool {
         self.lock(|inner| inner.denied)
+    }
+
+    /// Whether the last key refused was refused for now rather than for good, with no key
+    /// served since. A load that fails while this holds is worth retrying after a wait.
+    pub fn is_throttled(&self) -> bool {
+        self.lock(|inner| inner.throttled)
     }
 
     pub async fn request(&self, track: SpotifyId, file: FileId) -> Result<AudioKey, Error> {
