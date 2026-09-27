@@ -196,6 +196,7 @@ pub enum PlayerEvent {
         play_request_id: u64,
         track_id: SpotifyUri,
         denied: bool,
+        throttled: bool,
     },
     // The mixer volume was set to a new level.
     VolumeChanged {
@@ -1077,9 +1078,13 @@ impl PlayerTrackLoader {
             // Not all audio files are encrypted. If we can't get a key, try loading the track
             // without decryption. If the file was encrypted after all, the decoder will fail
             // parsing and bail out, so we should be safe from outputting ear-piercing noise.
+            // A refused key is an answer about this file, and decoding it without the key only
+            // stalls the load until the decoder times out.
             let key = match self.session.audio_key().request(track_id, file_id).await {
                 Ok(key) => Some(key),
-                Err(e) if e.kind == ErrorKind::PermissionDenied => {
+                Err(e)
+                    if matches!(e.kind, ErrorKind::PermissionDenied | ErrorKind::Unavailable) =>
+                {
                     error!("Unable to load key, giving up on <{track_id:?}>: {e}");
                     return None;
                 }
@@ -1379,10 +1384,12 @@ impl Future for PlayerInternal {
                                 "Skipping to next track, unable to load track <{track_id:?}>: {e:?}"
                             );
                             let denied = self.session.audio_key().is_denied();
+                            let throttled = self.session.audio_key().is_throttled();
                             self.send_event(PlayerEvent::Unavailable {
                                 track_id,
                                 play_request_id,
                                 denied,
+                                throttled,
                             })
                         }
                         Poll::Pending => (),
@@ -1419,10 +1426,12 @@ impl Future for PlayerInternal {
                         } = self.state
                         {
                             let denied = self.session.audio_key().is_denied();
+                            let throttled = self.session.audio_key().is_throttled();
                             self.send_event(PlayerEvent::Unavailable {
                                 track_id,
                                 play_request_id,
                                 denied,
+                                throttled,
                             });
                         }
                     }
